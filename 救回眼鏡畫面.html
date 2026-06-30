@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>VITURE 眼鏡畫面救回</title>
+<style>
+  :root { --bg:#0e1116; --card:#171c24; --line:#262d38; --txt:#e6edf3; --sub:#9aa7b4; --accent:#4cc2ff; --ok:#4caf50; --err:#ff5252; }
+  * { box-sizing:border-box; }
+  body { margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
+         background:var(--bg); color:var(--txt); font-family:"Segoe UI","Microsoft JhengHei",system-ui,sans-serif; padding:24px; }
+  .card { width:100%; max-width:460px; background:var(--card); border:1px solid var(--line); border-radius:16px; padding:28px; }
+  h1 { font-size:20px; margin:0 0 6px; }
+  .desc { color:var(--sub); font-size:14px; line-height:1.6; margin:0 0 22px; }
+  button { width:100%; border:0; border-radius:12px; padding:16px; font-size:17px; font-weight:600; cursor:pointer;
+           background:var(--accent); color:#04222e; transition:filter .15s; }
+  button:hover { filter:brightness(1.08); }
+  button:disabled { opacity:.55; cursor:default; }
+  #status { margin-top:18px; font-size:15px; min-height:22px; text-align:center; }
+  .ok { color:var(--ok); } .err { color:var(--err); } .muted { color:var(--sub); }
+  #log { margin-top:14px; background:#0b0e13; border:1px solid var(--line); border-radius:8px; padding:10px 12px;
+         font-family:Consolas,monospace; font-size:12px; color:var(--sub); max-height:140px; overflow:auto; white-space:pre-wrap; }
+  details { margin-top:20px; color:var(--sub); font-size:13px; line-height:1.6; }
+  summary { cursor:pointer; }
+  .spin { display:inline-block; animation:s 1s linear infinite; } @keyframes s { to{transform:rotate(360deg)} }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>🕶️ VITURE 眼鏡畫面救回</h1>
+    <p class="desc">拔線/關機後眼鏡沒畫面時，按下面按鈕對眼鏡送一次「軟重啟」，約 10 秒後畫面就會回來。不燒錄、不拔線、無變磚風險。</p>
+    <button id="btn">🔌 連接並救回畫面</button>
+    <div id="status" class="muted">需使用 Chrome 或 Edge 瀏覽器</div>
+    <div id="log" hidden></div>
+    <details>
+      <summary>原理與注意事項</summary>
+      <p>VITURE 眼鏡有 DP 韌體 bug：一般熱插拔（斷電）後 DisplayPort 不會重新啟動。本工具透過 <b>WebHID</b> 對眼鏡送出官方更新工具用的 <code>MSG_W_MCU_APP_JUMP_TO_BOOT</code> 指令，讓眼鏡做一次不斷電的軟重啟（進 bootloader→自動跳回 app），DP 畫面即恢復。</p>
+      <p>· 只支援 Chrome / Edge（需 WebHID）<br>· 第一次會跳出裝置選擇視窗，選 VITURE 那個並允許<br>· 若沒反應可再按一次</p>
+    </details>
+  </div>
+<script>
+(function () {
+  const VID = 0x35CA;
+  // MSG_W_MCU_APP_JUMP_TO_BOOT — 由 VITURE 官方 viture.wasm directiveBuild() 產生 (64-byte report, report id 0x00)
+  const JUMP_TO_BOOT = new Uint8Array(64);
+  JUMP_TO_BOOT[0]=0xff; JUMP_TO_BOOT[1]=0xfe; JUMP_TO_BOOT[2]=0xa3; JUMP_TO_BOOT[3]=0xb2; JUMP_TO_BOOT[4]=0x0c; JUMP_TO_BOOT[14]=0x44;
+  const REPORT_ID = 0x00;
+
+  const btn = document.getElementById('btn');
+  const statusEl = document.getElementById('status');
+  const logEl = document.getElementById('log');
+
+  function setStatus(msg, cls) { statusEl.textContent = msg; statusEl.className = cls || 'muted'; }
+  function log(msg) { logEl.hidden = false; logEl.textContent += msg + '\n'; logEl.scrollTop = logEl.scrollHeight; }
+
+  if (!('hid' in navigator)) {
+    setStatus('⚠ 此瀏覽器不支援 WebHID，請改用 Chrome 或 Edge', 'err');
+    btn.disabled = true;
+    return;
+  }
+  setStatus('準備就緒，請接上眼鏡後按按鈕', 'muted');
+
+  async function getDevice() {
+    // 先看是否已授權過
+    let devices = (await navigator.hid.getDevices()).filter(d => d.vendorId === VID);
+    if (devices.length === 0) {
+      devices = await navigator.hid.requestDevice({ filters: [{ vendorId: VID }] });
+    }
+    return devices.filter(d => d.vendorId === VID);
+  }
+
+  btn.onclick = async function () {
+    btn.disabled = true;
+    logEl.textContent = '';
+    setStatus('連接中…', 'muted');
+    try {
+      const devices = await getDevice();
+      if (!devices.length) { setStatus('沒有選到 VITURE 眼鏡', 'err'); btn.disabled = false; return; }
+
+      let sent = 0;
+      for (const d of devices) {
+        try {
+          if (!d.opened) await d.open();
+          await d.sendReport(REPORT_ID, JUMP_TO_BOOT);
+          sent++;
+          log('✓ 已送往: ' + (d.productName || 'VITURE HID'));
+        } catch (e) {
+          log('· 某介面略過: ' + e.message);
+        }
+      }
+
+      if (sent === 0) { setStatus('指令送出失敗（找不到可用的控制介面）', 'err'); btn.disabled = false; return; }
+
+      setStatus('✅ 已送出！眼鏡重啟中，請稍候…', 'ok');
+      let n = 10;
+      const t = setInterval(() => {
+        n--;
+        setStatus('✅ 重啟中，約 ' + n + ' 秒後畫面回來…', 'ok');
+        if (n <= 0) {
+          clearInterval(t);
+          setStatus('🎉 完成！眼鏡畫面應該回來了（若還沒，再按一次）', 'ok');
+          btn.disabled = false;
+        }
+      }, 1000);
+    } catch (e) {
+      setStatus('錯誤: ' + e.message, 'err');
+      btn.disabled = false;
+    }
+  };
+})();
+</script>
+</body>
+</html>
